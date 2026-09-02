@@ -20,7 +20,7 @@ ota verify --feed app
 Apps:
 
 ```swift
-.package(url: "https://github.com/ramonfabrega/ota", from: "0.0.1"),
+.package(url: "https://github.com/ramonfabrega/ota", from: "0.1.0"),
 // the library half, zero deps — safe in a CLI-side target:
 //   .product(name: "OTA", package: "ota")
 // the updater, only in the executable target that embeds Sparkle.framework

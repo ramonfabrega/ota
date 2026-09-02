@@ -5,4 +5,4 @@
 /// `#filePath` — the source tree it was built from, which may have moved,
 /// changed or been bumped since. So the constant is the truth in the binary
 /// and `VERSION` is the truth in the repo, and one test asserts they agree.
-public let otaVersion = "0.0.1"
+public let otaVersion = "0.1.0"

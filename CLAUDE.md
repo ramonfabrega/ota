@@ -28,15 +28,27 @@ name.
   the tool wants the same primitives (plist, version, bundle layout). One
   library, two faces, no second runtime. Bun was the house CLI default and
   was rejected for this on precedent alone not being a reason.
-- **One repo, three products, one tag line.** `OTAKit` (release primitives,
+- **One repo, four products, one tag line.** `OTAKit` (release primitives,
   zero deps), `ota` (the CLI over it; target `OTACLI` because `Sources/ota`
   and `Sources/OTA` are one directory on a case-insensitive disk), `OTA`
-  (app-side, depends on Sparkle). Apps depend on `OTA` only. SemVer tags,
-  consumers pin `from:`; pre-1.0 rules.
-- **Plans are values.** Every step is a `Command` before it is a side
-  effect: `Signing.plan`, `Notarize.plan`, `Appcast.generatePlan` return
-  arrays a test can read and `ota release --dry-run` prints. The exact
-  `codesign` order is asserted in `Tests/`, not described in a comment.
+  (app-side identity: `BuildInfo`, `CLIInstall` — ZERO DEPS), and
+  `OTAUpdater` (the SUFeedURL-gated Sparkle updater). Apps depend on `OTA`,
+  plus `OTAUpdater` if they self-update. The split was ccc's call and it is
+  load-bearing: a consumer's CLI-side library (ccc's `CCCKit`) is what every
+  test links, and a signed binary framework has no business behind two
+  structs that never touch it. Only the executable target that embeds
+  `Sparkle.framework` and carries the `@executable_path/../Frameworks` rpath
+  takes `OTAUpdater`. SemVer tags, consumers pin `from:`; pre-1.0 rules.
+- **Plans are values, and the guards are IN the plan.** A release is
+  `[Step]`, not `[Command]`: three of its steps are not processes (the EdDSA
+  key-match guard, the single-item assertion, the stable-key rewrite) and one
+  is conditional (fetch Sparkle's tools only when missing). A plan of
+  commands could only ever print the parts that are not the guards — and the
+  guards are the whole reason disk's copy of the script was better than
+  mux's. `Command` stays the leaf, `Signing.plan` / `Notarize.plan` /
+  `Appcast.generatePlan` build the steps, and `--dry-run` prints the guards
+  where they fire. The exact `codesign` order is asserted in `Tests/`, not
+  described in a comment.
 - **No secrets, no per-app canon here.** Public repo. The EdDSA PUBLIC key is
   pinned in each app's bundle spec (it is what the app trusts); the notary
   profile name is a flag with a default; the team id is read off the
@@ -54,9 +66,23 @@ name.
   for packaging tests on the building Mac only.
 - **The feed is single-item, and that is a correctness property.** Every
   item points at the same stable key, so only the newest can be truthful.
-  `--maximum-versions 1` does not guarantee it: archive other zips, delete
-  the appcast, regenerate from empty, assert one `<item>`, then check the
-  live `length=` against the zip's `content-length`.
+  `--maximum-versions 1` does not guarantee it: archive other zips (every
+  `*.zip`, not `<App>-v*.zip` — `generate_appcast` scans the DIRECTORY, not a
+  name pattern), delete the appcast, regenerate from empty, assert one
+  `<item>`, then check the live `length=` against the zip's `content-length`.
+  The trigger is narrower than "sometimes", and was reproduced deliberately:
+  `generate_appcast` prunes a same-arch predecessor itself, and keeps an
+  older item only when the newer one's HARDWARE REQUIREMENTS do not cover
+  it — an arch transition, in either direction. Every consumer's first
+  universal cut is the exposed one.
+- **A release's input is a build product, never an installed app.** Signing
+  is in place and the zip lands beside the bundle, so `ota release
+  /Applications/X.app` re-signs the copy you are running and publishes it —
+  and the EdDSA guard passes, because it is the real key. `/Applications/
+  Disk.app` is the documented `--dry-run` demo, i.e. the most likely path to
+  be typed one day without the flag, so the path is refused outright. The
+  general form, for any fleet CLI: a documented demo one flag away from an
+  irreversible action will eventually be run without the flag.
 - **Facts come off the binary, never typed twice.** `LSMinimumSystemVersion`
   from `LC_BUILD_VERSION`; archs from `lipo`; linked frameworks from `otool
   -L`. A plist that states what the binary already knows will disagree with
@@ -81,10 +107,12 @@ widget), ccc (`~/code/fun/ccc`, SwiftPM, arm64, CLI symlinked into the
 bundle). scry (`~/code/fun/scry`) has the dev lane only and a Sparkle lane
 waiting.
 
-1. **ccc first** — its session is live and hand-wrote the latest copy; it
-   can steer while the interface is soft.
+1. ~~**ccc first**~~ — **DONE, v0.1.8 (2026-09-02)**, and it steered the
+   interface while it was soft: the `OTA`/`OTAUpdater` split and naming the
+   peer at the decode are both ccc's calls. Its old lane is retired.
 2. **disk second** — exercises the widget appex and the universal products
-   dir, which ccc dropped.
+   dir, which ccc dropped. It is also the first consumer that CAN hit the
+   arch-transition feed bug, being the only fat one.
 3. **mux last, and it is the exit criterion**: when mux can delete
    `scripts/package-mac.sh` and lose nothing (its FFmpeg prune stays as its
    own pre-step), the tool is ready. Then an issue per consumer repo
@@ -95,52 +123,61 @@ Each consumer's `scripts/package` becomes: its build, `ota bundle` (SwiftPM
 apps), `ota release`. Its RELEASES.md shrinks to what is app-specific; the
 shared runbook is `docs/RELEASING.md` here (to be written from disk's).
 
-## State of the scaffold (what the first session inherits)
+## State (v0.1.0, 2026-09-02 — the flow is proven end to end)
 
-Wired and tested (13 tests, swift-testing): the parsers (`minos`, linked
+**ccc v0.1.8 shipped through `ota release` with no flags**: inside-out
+signing, notarized on the first submission, stapled, single-item appcast on
+the fleet's key, both CDN keys, live-feed check green — and air installed it
+through Sparkle from that feed. ccc's `scripts/package` is now its build plus
+`ota bundle` and `ota release`; `scripts/make-bundle`, `Updater.swift` and
+the `BuildInfo`/`CLIInstall` halves of its `Hosts/BuildInfo.swift` are gone
+(ccc `docs/DESIGN.md` §6a). Its old lane is retired. That is the seam
+holding for one consumer, which is what disk and mux were waiting on.
+
+Wired and tested (42 tests, swift-testing): the parsers (`minos`, linked
 frameworks, archs, Developer ID identity), `Version.read`, `BundleSpec` →
-Info.plist, `Signing.insideOut` over a real bundle layout, the notarize and
-appcast plans, the stable-key rewrite, `Feed.check`. Verbs: `ota version`
-(works), `ota verify --feed <prefix>` (works, live), `ota release <App.app>
---feed <prefix> --dry-run` (prints the exact plan; against `/Applications/
-Disk.app` it reproduces `disk/scripts/package` step for step, widget
-included), `ota bundle` (prints the spec; assembly not wired).
+Info.plist, `Signing.insideOut` over a real bundle layout, the whole release
+plan as `[Step]` with its guards in position, the executor and each guard's
+failure message, `Bundler` assembly and the arch assertion, `Feed.check`,
+and the runner's concurrent pipe drain (a child that writes 200K to the pipe
+nobody reads is what the old one deadlocked on).
+
+Verbs, all live: `ota version`; `ota bundle` (assembles for real — executable,
+whatever the binary links, icon, an already-built `.appex` stamped to the
+app's version, `Info.plist`; `--universal` reads `.build/apple/Products/
+Release` and asserts every Mach-O is fat); `ota release` (executes, and
+`--dry-run` prints the plan INCLUDING the guards; refuses a path under
+`/Applications` or `~/Applications`, because signing is in place and the zip
+lands beside the bundle, so the documented demo was one flag from a live
+release); `ota verify --feed <prefix>` (live) and `--appcast <path>` (the
+same single-item guard on a local feed).
 
 Not wired, in the order they earn themselves:
 
-- `ota release` execution: run the plan through `SystemRunner`, assert one
-  `<item>` after `generate_appcast`, apply the stable-key rewrite, then run
-  the two `share` lines (agent-runnable: disk's zips have never tripped the
-  classifier) and finish with the live-feed check. Sparkle tools fetch on
-  first use. The EdDSA key-match guard (`generate_keys -p` vs the app's
-  `SUPublicEDKey`) before signing — a mismatch means every shipped update
-  is rejected on the receiving end.
-- `ota bundle` assembly: `Contents/MacOS`, `Info.plist`, icon, embed
-  `Sparkle.framework` from the products dir, `@executable_path/../Frameworks`
-  rpath is the consumer's linker flag. Universal: products dir
-  `.build/apple/Products/Release`, and an arch assertion on every Mach-O in
-  the bundle (a widget built by xcodebuild can be thin while the app is fat).
-- `Feed.enclosure` reads `sparkle:version` off the enclosure tag; Sparkle 2
-  feeds put it in a `<sparkle:version>` element — read both.
-- `scripts/install` stamps the version into the bin (today `SelfID` reads
-  `VERSION` through `#filePath`, which is the source tree).
+- disk second (the widget appex and the universal products dir, which ccc
+  dropped), then mux, which is the exit criterion: when mux can delete
+  `scripts/package-mac.sh` and lose nothing, the tool is done.
 - Release notes: no consumer feeds the appcast any; the GitHub Release
-  already has generated notes. Cheap win, after the flow works.
+  already has generated notes.
+- `docs/RELEASING.md`, the shared runbook. Better written from a real cut
+  than ahead of one — there is now a real cut to write it from.
 - Launch at login (`SMAppService`) and the first-launch "install the
   command" offer in `OTA` — when ccc writes them, they move here.
 
-First move for the first session: read this file, `docs/DESIGN.md`,
-`disk/scripts/package` and `disk/RELEASES.md`; then wire `ota release`
-execution against a `--ad-hoc` cut of ccc or disk before touching
-notarization. Propose the consumer-side diff for ccc before writing it.
+Recorded, not fixed: `Signing.insideOut` hardcodes Sparkle's `Versions/B`
+(fine for 2.9, one symlink read from being version-proof), and it does not
+recurse into a non-Sparkle framework's own nested code (fine for all three
+consumers today).
 
 ## Code conventions
 
 - swift-testing (`import Testing`), one suite per module concern; tests
   build a fake `.app` under the temp dir rather than mocking `FileManager`.
-- Every `ota` invocation self-identifies on stderr (`ota 0.0.1`) so a
-  transcript says which build did the work. JSON output is a flag to add,
-  not a second code path.
+- Every `ota` invocation self-identifies on stderr (`ota 0.1.0`) so a
+  transcript says which build did the work. The version is the compiled-in
+  `otaVersion`, not a read of `VERSION` — an installed binary is a copy and
+  cannot find the repo — and one test holds the two together. JSON output is
+  a flag to add, not a second code path.
 - Prompts that drive the CLI pin the invocation (`ota` on PATH — never
   `swift run` "from the current directory").
 - No `sh -c` in plans when an argv will do; `find … -exec … ;` is passed as
