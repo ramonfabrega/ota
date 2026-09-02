@@ -15,8 +15,11 @@ public struct BuildInfo: Codable, Sendable, Equatable {
     /// `ccc`, `Disk` — what this build calls itself. Everything user-facing
     /// derives from it, so a consumer names itself once.
     ///
-    /// Empty when decoded from a peer old enough to predate this field; see
-    /// `naming(_:)`, which is how a reader that knows the answer fills it in.
+    /// A peer old enough to predate this field sends no name, so the READER
+    /// supplies it — it ran the command, so it is what knows. Decode through
+    /// `decode(_:naming:)` or a `JSONDecoder.naming(_:)`, never a bare
+    /// `JSONDecoder()`, or a remote row renders an empty name and nothing
+    /// says why.
     public var name: String
     public var version: String?
     public var build: Int?
@@ -39,13 +42,20 @@ public struct BuildInfo: Codable, Sendable, Equatable {
         self.dev = dev
     }
 
+    /// The name a decode falls back to when the peer sent none. Set it
+    /// through `decode(_:naming:)` or `JSONDecoder.naming(_:)`.
+    public static let nameUserInfoKey = CodingUserInfoKey(rawValue: "com.ramonfabrega.ota.buildInfo.name")!
+
     /// An older peer's `<app> version --json` has neither `dev` nor `name`:
     /// that build predates the lane split, and it was always a release cut.
     /// Decoding must not fail over a field that did not exist yet — the
     /// whole point of asking a remote host its version is to survive skew.
+    /// A peer new enough to send its own `name` always wins over the
+    /// reader's fallback.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        let fallback = decoder.userInfo[Self.nameUserInfoKey] as? String ?? ""
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? fallback
         version = try c.decodeIfPresent(String.self, forKey: .version)
         build = try c.decodeIfPresent(Int.self, forKey: .build)
         bundlePath = try c.decodeIfPresent(String.self, forKey: .bundlePath)
@@ -53,9 +63,14 @@ public struct BuildInfo: Codable, Sendable, Equatable {
         dev = try c.decodeIfPresent(Bool.self, forKey: .dev) ?? false
     }
 
-    /// A copy that knows what it is called. For a `BuildInfo` decoded from a
-    /// peer that predates `name`: the reader ran the command, so the reader
-    /// is the one that knows.
+    /// Decode a peer's `<app> version --json`. `naming` is what the reader
+    /// calls the command it ran, used only when the peer is too old to say.
+    public static func decode(_ data: Data, naming name: String) throws -> BuildInfo {
+        try JSONDecoder.naming(name).decode(BuildInfo.self, from: data)
+    }
+
+    /// A copy that knows what it is called — for a `BuildInfo` that arrived
+    /// some way other than a decode. Never overwrites a name already set.
     public func naming(_ name: String) -> BuildInfo {
         var copy = self
         if copy.name.isEmpty { copy.name = name }
@@ -111,5 +126,16 @@ public struct BuildInfo: Codable, Sendable, Equatable {
             }
             dir = dir.deletingLastPathComponent()
         }
+    }
+}
+
+extension JSONDecoder {
+    /// A decoder that names any `BuildInfo` it reads whose peer was too old
+    /// to name itself. Use it for a nested decode too — a `BuildInfo` inside
+    /// some larger status payload gets the fallback the same way.
+    public static func naming(_ name: String) -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.userInfo[BuildInfo.nameUserInfoKey] = name
+        return decoder
     }
 }

@@ -65,16 +65,31 @@ import Testing
         let legacy = Data("""
         {"version":"0.1.2","build":41,"bundlePath":"/Applications/ccc.app","executablePath":"/Applications/ccc.app/Contents/MacOS/ccc"}
         """.utf8)
-        let info = try JSONDecoder().decode(BuildInfo.self, from: legacy)
+        // The reader ran the command, so the reader is what supplies the
+        // name — and it does so AT the decode, not as a call it could forget.
+        let info = try BuildInfo.decode(legacy, naming: "ccc")
         #expect(!info.dev)
-        #expect(info.name.isEmpty)
+        #expect(info.name == "ccc")
         #expect(info.short == "0.1.2 (41)")
-        // The reader ran the command, so the reader is what knows the name.
-        #expect(info.naming("ccc").appTitle == "ccc")
-        // …and naming never overwrites a name the peer did supply.
-        var named = info
-        named.name = "scry"
-        #expect(named.naming("ccc").name == "scry")
+        #expect(info.appTitle == "ccc")
+
+        // A peer new enough to name itself always wins over the fallback.
+        let newer = Data("""
+        {"name":"scry","version":"0.2.0","build":9,"executablePath":"/x/scry","dev":false}
+        """.utf8)
+        #expect(try BuildInfo.decode(newer, naming: "ccc").name == "scry")
+
+        // The fallback reaches a nested decode too, which is the shape a
+        // status payload carrying a BuildInfo actually has.
+        struct HostStatus: Decodable { var host: String; var build: BuildInfo }
+        let nested = Data("""
+        {"host":"air","build":{"version":"0.1.2","build":41,"executablePath":"/x/ccc"}}
+        """.utf8)
+        #expect(try JSONDecoder.naming("ccc").decode(HostStatus.self, from: nested).build.name == "ccc")
+
+        // A bare decoder still does not throw — skew must never be fatal —
+        // but it cannot know the name, which is why the API above exists.
+        #expect(try JSONDecoder().decode(BuildInfo.self, from: legacy).name.isEmpty)
     }
 
     @Test func roundTripsThroughJSON() throws {
