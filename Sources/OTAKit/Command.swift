@@ -34,29 +34,59 @@ public struct CommandFailure: Error, CustomStringConvertible {
 /// Runs commands. `SystemRunner` is the real one; tests substitute a
 /// recorder or canned output.
 public protocol Runner: Sendable {
-    /// Runs `command`, returns stdout; throws `CommandFailure` on non-zero exit.
+    /// Runs `command` and returns stdout; throws `CommandFailure` on non-zero
+    /// exit. `streaming` hands the child our own stdout/stderr instead of
+    /// capturing it: `notarytool submit --wait` and `generate_appcast` run for
+    /// minutes and say useful things while they do, and a release that prints
+    /// nothing through four of them reads as a hang. Streaming returns "".
     @discardableResult
-    func run(_ command: Command) throws -> String
+    func run(_ command: Command, streaming: Bool) throws -> String
+}
+
+extension Runner {
+    @discardableResult
+    public func run(_ command: Command) throws -> String { try run(command, streaming: false) }
 }
 
 public struct SystemRunner: Runner {
     public init() {}
 
     @discardableResult
-    public func run(_ command: Command) throws -> String {
+    public func run(_ command: Command, streaming: Bool = false) throws -> String {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = [command.program] + command.arguments
+
+        if streaming {
+            process.standardOutput = FileHandle.standardOutput
+            process.standardError = FileHandle.standardError
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                throw CommandFailure(command: command, status: process.terminationStatus, stderr: "")
+            }
+            return ""
+        }
+
+        // Both pipes are drained CONCURRENTLY, and only then is the child
+        // reaped. Draining one to EOF first deadlocks the moment the other
+        // fills its 64K kernel buffer — which is exactly what a chatty child
+        // does, so the bug waits for the noisiest, longest command to hit it.
         let out = Pipe(), err = Pipe()
         process.standardOutput = out
         process.standardError = err
         try process.run()
-        let stdout = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        let stderr = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        nonisolated(unsafe) var stdout = Data()
+        nonisolated(unsafe) var stderr = Data()
+        let group = DispatchGroup()
+        DispatchQueue.global().async(group: group) { stdout = out.fileHandleForReading.readDataToEndOfFile() }
+        DispatchQueue.global().async(group: group) { stderr = err.fileHandleForReading.readDataToEndOfFile() }
+        group.wait()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
-            throw CommandFailure(command: command, status: process.terminationStatus, stderr: stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+            throw CommandFailure(command: command, status: process.terminationStatus,
+                                 stderr: String(decoding: stderr, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        return stdout
+        return String(decoding: stdout, as: UTF8.self)
     }
 }

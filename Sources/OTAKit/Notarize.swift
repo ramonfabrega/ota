@@ -17,15 +17,20 @@ public enum Notarize {
     /// stapled app so the ticket travels with it. The notarytool keychain
     /// profile is per Apple account, not per app (`mux-notary` serves the
     /// fleet; a leftover name).
-    public static func plan(app: URL, zip: URL, profile: String) -> [Command] {
+    ///
+    /// `notarytool submit --wait` streams: it is minutes long and reports the
+    /// submission id and status as it goes, and those are the only thread to
+    /// pull when Apple rejects. Same for `stapler` and `spctl`, which say
+    /// what they found on stderr.
+    public static func plan(app: URL, zip: URL, profile: String) -> [Step] {
         [
-            Self.zip(app: app, to: zip),
-            Command("xcrun", "notarytool", "submit", zip.path, "--keychain-profile", profile, "--wait"),
-            Command("xcrun", "stapler", "staple", app.path),
-            Command("xcrun", "stapler", "validate", app.path),
-            Command("spctl", "-a", "-vvv", "--type", "execute", app.path),
-            Command("rm", "-f", zip.path),
-            Self.zip(app: app, to: zip),
+            .run(Self.zip(app: app, to: zip)),
+            .stream(Command("xcrun", "notarytool", "submit", zip.path, "--keychain-profile", profile, "--wait")),
+            .stream(Command("xcrun", "stapler", "staple", app.path)),
+            .stream(Command("xcrun", "stapler", "validate", app.path)),
+            .stream(Command("spctl", "-a", "-vvv", "--type", "execute", app.path)),
+            .run(Command("rm", "-f", zip.path)),
+            .run(Self.zip(app: app, to: zip)),
         ]
     }
 }
