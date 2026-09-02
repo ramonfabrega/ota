@@ -1,0 +1,11 @@
+#!/bin/zsh
+# Install `ota` on this Mac: release build → ~/.local/bin/ota. One install
+# target — the Mac whose Keychain holds the Developer ID cert, the notarytool
+# profile and the Sparkle EdDSA key.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+swift build -c release 2>&1 | grep -E "error|Build complete" | tail -2
+BIN="$HOME/.local/bin"
+mkdir -p "$BIN"
+cp -f .build/release/ota "$BIN/ota"
+echo "installed: $BIN/ota ($("$BIN/ota" --version))"
