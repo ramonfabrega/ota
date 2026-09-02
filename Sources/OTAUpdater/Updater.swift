@@ -1,4 +1,5 @@
 import AppKit
+import OTA
 import Sparkle
 import SwiftUI
 
@@ -32,10 +33,13 @@ public final class Updater {
 
     /// AppKit face: the menu item, wired to Sparkle's own action so its
     /// enabled state follows `canCheckForUpdates` through validation.
-    /// Disabled, with the reason as its title, when not running from a bundle.
+    /// Disabled, with the reason as its title, on the dev lane — which is a
+    /// bundle without the feed keys as well as no bundle at all, and "dev
+    /// build" is the wording that covers both (ccc's, and it is the case
+    /// that actually happens).
     public func menuItem() -> NSMenuItem {
         guard let controller else {
-            let item = NSMenuItem(title: "Check for Updates… (not a bundle)", action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: "Check for Updates… (dev build)", action: nil, keyEquivalent: "")
             item.isEnabled = false
             return item
         }
@@ -55,7 +59,7 @@ public struct CheckForUpdatesCommand: Commands {
 
     public var body: some Commands {
         CommandGroup(after: .appInfo) {
-            Button(updater.isEnabled ? "Check for Updates…" : "Check for Updates… (not a bundle)") {
+            Button(updater.isEnabled ? "Check for Updates…" : "Check for Updates… (dev build)") {
                 updater.checkForUpdates()
             }
             .disabled(!updater.canCheck)

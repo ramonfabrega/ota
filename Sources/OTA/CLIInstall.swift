@@ -31,6 +31,13 @@ public struct CLIInstall: Sendable {
         /// Something else: another bundle's link, a dev build, a real file. The user's; never replaced quietly.
         case foreign(path: String, target: String?)
         case missing
+
+        public var path: String? {
+            switch self {
+            case .installed(let p), .dangling(let p, _), .foreign(let p, _): p
+            case .missing: nil
+            }
+        }
     }
 
     func expand(_ dir: String) -> String {
@@ -39,7 +46,7 @@ public struct CLIInstall: Sendable {
 
     /// The first `command` found in `directories` (then every PATH entry),
     /// judged against `executable`.
-    public func status(executable: String = BuildInfo.current.executablePath,
+    public func status(executable: String = BuildInfo.currentExecutablePath,
                        path: String? = ProcessInfo.processInfo.environment["PATH"]) -> Status {
         let fm = FileManager.default
         let dirs = directories + (path ?? "").split(separator: ":").map(String.init)
@@ -57,10 +64,20 @@ public struct CLIInstall: Sendable {
     }
 
     public struct Result: Equatable, Sendable {
+        public var command: String
         public var path: String
         public var replaced: String?
         /// The directory had to be created; it may not be on PATH yet.
         public var createdDirectory: Bool
+
+        public var description: String {
+            var out = "\(command) → \(path)"
+            if let replaced { out += " (was \(replaced))" }
+            if createdDirectory {
+                out += "; created \(URL(filePath: path).deletingLastPathComponent().path) — add it to PATH if it is not"
+            }
+            return out
+        }
     }
 
     public struct InstallError: Error, CustomStringConvertible {
@@ -70,7 +87,7 @@ public struct CLIInstall: Sendable {
     /// Link `command` to `executable`. A symlink already there is relinked
     /// (its old target reported); a regular file is refused unless `force`.
     @discardableResult
-    public func install(executable: String = BuildInfo.current.executablePath,
+    public func install(executable: String = BuildInfo.currentExecutablePath,
                         directory: String? = nil, force: Bool = false) throws -> Result {
         let fm = FileManager.default
         var created = false
@@ -93,6 +110,10 @@ public struct CLIInstall: Sendable {
         let link = dir + "/" + command
         var replaced: String?
         if let target = try? fm.destinationOfSymbolicLink(atPath: link) {
+            // Already ours and already right: reinstalling is a no-op, and
+            // reporting a "replaced" target it never replaced would read as
+            // churn in an install that did nothing.
+            if target == executable { return Result(command: command, path: link, replaced: nil, createdDirectory: created) }
             replaced = target
             try fm.removeItem(atPath: link)
         } else if fm.fileExists(atPath: link) {
@@ -100,7 +121,11 @@ public struct CLIInstall: Sendable {
             replaced = link
             try fm.removeItem(atPath: link)
         }
-        try fm.createSymbolicLink(atPath: link, withDestinationPath: executable)
-        return Result(path: link, replaced: replaced, createdDirectory: created)
+        do {
+            try fm.createSymbolicLink(atPath: link, withDestinationPath: executable)
+        } catch {
+            throw InstallError(description: "could not link \(link): \(error.localizedDescription)")
+        }
+        return Result(command: command, path: link, replaced: replaced, createdDirectory: created)
     }
 }

@@ -2,11 +2,16 @@
 // ota — the fleet's over-the-air release flow for Mac apps, in one place.
 //
 // Three products, one tag line:
-//   OTAKit  the release primitives (version, binary facts, bundle, sign,
-//           notarize, appcast, feed). No dependencies. What `ota` drives.
-//   ota     the CLI. Installed once, on the Mac that holds the credentials.
-//   OTA     the app-side library: the SUFeedURL-gated updater, CLIInstall,
-//           BuildInfo. Depends on Sparkle. Apps depend on this product only.
+//   OTAKit      the release primitives (version, binary facts, bundle, sign,
+//               notarize, appcast, feed). No dependencies. What `ota` drives.
+//   ota         the CLI. Installed once, on the Mac that holds the credentials.
+//   OTA         the app-side identity: BuildInfo and CLIInstall. NO
+//               DEPENDENCIES, deliberately — a consumer's CLI-side library
+//               wants these and must not link Sparkle to get them (ccc's
+//               CCCKit is what every test links).
+//   OTAUpdater  the SUFeedURL-gated Sparkle updater. Imported only by the
+//               executable target that embeds Sparkle.framework and carries
+//               the @executable_path/../Frameworks rpath.
 import PackageDescription
 
 let package = Package(
@@ -15,6 +20,7 @@ let package = Package(
     products: [
         .library(name: "OTAKit", targets: ["OTAKit"]),
         .library(name: "OTA", targets: ["OTA"]),
+        .library(name: "OTAUpdater", targets: ["OTAUpdater"]),
         .executable(name: "ota", targets: ["OTACLI"]),
     ],
     dependencies: [
@@ -31,10 +37,14 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
+        .target(name: "OTA"),
         .target(
-            name: "OTA",
-            dependencies: [.product(name: "Sparkle", package: "Sparkle")]
+            name: "OTAUpdater",
+            dependencies: ["OTA", .product(name: "Sparkle", package: "Sparkle")]
         ),
         .testTarget(name: "OTAKitTests", dependencies: ["OTAKit"]),
+        // Linking OTA and NOT Sparkle is itself the check: if OTA ever grows
+        // a Sparkle dependency again, this target stops building.
+        .testTarget(name: "OTATests", dependencies: ["OTA"]),
     ]
 )
