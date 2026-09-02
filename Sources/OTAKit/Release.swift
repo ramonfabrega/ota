@@ -97,6 +97,32 @@ public struct Release: Sendable {
         public var description: String
     }
 
+    /// A release's input is a BUILD PRODUCT, and this refuses an installed
+    /// app. Signing happens in place and the zip is written beside the
+    /// bundle, so pointing a real run at `/Applications/Disk.app` re-signs
+    /// the copy you are running, drops a zip into `/Applications`, and then
+    /// publishes it over the current release. Nothing downstream would stop
+    /// it: the EdDSA guard passes, because it is the real key.
+    ///
+    /// `/Applications/Disk.app` is also the documented `--dry-run` demo,
+    /// which is precisely why it is the most likely path to be typed one day
+    /// without the flag. Returns the reason, or `nil` when the path is fine.
+    public static func installedAppRefusal(for app: URL, home: URL = .homeDirectory) -> String? {
+        let path = app.standardizedFileURL.path
+        let installed = ["/Applications", home.appending(path: "Applications").standardizedFileURL.path]
+        guard installed.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) else { return nil }
+        return """
+            \(path) is an INSTALLED app, not a build product — refusing.
+
+            A release signs the bundle in place and writes the zip beside it, so this would \
+            re-sign the copy you are running, leave a zip in \(app.deletingLastPathComponent().path), \
+            and publish it over the current release. Point it at the bundle your build just made \
+            (\(app.deletingPathExtension().lastPathComponent.lowercased())'s scripts/package puts one in .build/dist/).
+
+            --dry-run against this path is still allowed; it only prints.
+            """
+    }
+
     /// An ad-hoc signature is this Mac's alone: Gatekeeper refuses it
     /// elsewhere and TCC identity churns per rebuild. It exists for
     /// packaging tests on the building Mac, so it may never reach the CDN.

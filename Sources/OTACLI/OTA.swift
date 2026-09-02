@@ -184,10 +184,18 @@ struct Release: ParsableCommand {
         try release.validate()
         let steps = release.steps()
 
+        // An installed app is not a build product. A dry run against one is
+        // fine — it only prints — but it says so, because the difference
+        // between the two commands is one flag.
+        let installedRefusal = OTAKit.Release.installedAppRefusal(for: bundle.url)
         guard !dryRun else {
             for step in steps { print(step) }
+            if let installedRefusal {
+                print("\nnote: a real run of this would be refused —\n\(installedRefusal)", to: &standardError)
+            }
             return
         }
+        if let installedRefusal { throw ValidationError(installedRefusal) }
 
         try FileManager.default.createDirectory(at: zip.deletingLastPathComponent(), withIntermediateDirectories: true)
         if let target {

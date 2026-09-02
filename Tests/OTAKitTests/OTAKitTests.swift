@@ -240,6 +240,25 @@ func fakeApp(widget: Bool, publicEDKey: String? = nil, version: String = "1.2.3"
         try release(adHoc: true, publish: false).validate()
     }
 
+    /// The input is a build product. Signing is in place and the zip lands
+    /// beside the bundle, so a real run against an installed app re-signs
+    /// what you are running and publishes it — and `/Applications/Disk.app`
+    /// is the documented dry-run demo, one flag away from that.
+    @Test func anInstalledAppIsRefused() {
+        let home = URL(filePath: "/Users/x")
+        #expect(OTAKit.Release.installedAppRefusal(for: URL(filePath: "/Applications/Disk.app"), home: home) != nil)
+        #expect(OTAKit.Release.installedAppRefusal(for: URL(filePath: "/Applications/Utilities/Disk.app"), home: home) != nil)
+        #expect(OTAKit.Release.installedAppRefusal(for: URL(filePath: "/Users/x/Applications/ccc.app"), home: home) != nil)
+
+        // A build product is what it is for, wherever the repo lives.
+        #expect(OTAKit.Release.installedAppRefusal(for: URL(filePath: "/Users/x/code/ccc/.build/dist/ccc.app"), home: home) == nil)
+        #expect(OTAKit.Release.installedAppRefusal(for: URL(filePath: "/tmp/scratch/ccc.app"), home: home) == nil)
+        // Not fooled by a prefix that merely starts the same way.
+        #expect(OTAKit.Release.installedAppRefusal(for: URL(filePath: "/ApplicationsOfMine/ccc.app"), home: home) == nil)
+        // …nor by a path that walks back out of it.
+        #expect(OTAKit.Release.installedAppRefusal(for: URL(filePath: "/Applications/../build/ccc.app"), home: home) == nil)
+    }
+
     @Test func noAppcastMeansNoGuardsAndNoPublish() throws {
         let steps = try release(adHoc: true, publish: false, appcast: false).steps()
         #expect(!steps.contains { if case .requireEdDSAKeyMatch = $0 { return true }; return false })
