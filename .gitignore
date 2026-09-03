@@ -5,3 +5,7 @@
 .DS_Store
 xcuserdata/
 *.xcuserstate
+# swiftc dependency/diagnostic files: a direct compile drops these beside the
+# sources rather than under .build/, and eight of them were once committed.
+*.d
+*.dia

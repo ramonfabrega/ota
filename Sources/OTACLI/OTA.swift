@@ -83,7 +83,7 @@ struct Bundle: ParsableCommand {
         var feedSpec: BundleSpec.Feed?
         if let feed {
             guard let publicKey else { throw ValidationError("--feed needs --public-key") }
-            feedSpec = .init(url: "https://cdn.ramonfabrega.com/\(feed)/appcast.xml", publicEDKey: publicKey)
+            feedSpec = .init(url: Appcast.prefixURL(feed: feed) + "appcast.xml", publicEDKey: publicKey)
         } else if publicKey != nil {
             throw ValidationError("--public-key without --feed: a bundle with a key and no feed still never updates")
         }
@@ -175,7 +175,7 @@ struct Release: ParsableCommand {
             guard let feed else { throw ValidationError("--feed is required to cut an appcast (e.g. --feed ccc)") }
             let dir = feedDir.map { URL(filePath: $0) }
                 ?? URL.homeDirectory.appending(path: "Library/Application Support/\(feed)-releases")
-            target = .init(feedDir: dir, prefixURL: "https://cdn.ramonfabrega.com/\(feed)/",
+            target = .init(feedDir: dir, prefixURL: Appcast.prefixURL(feed: feed),
                            cdnPrefix: feed, publish: !adHoc && !noPublish)
         }
 
@@ -257,7 +257,7 @@ struct Verify: ParsableCommand {
     }
 
     func checkLive(_ feed: String) throws {
-        let prefix = "https://cdn.ramonfabrega.com/\(feed)/"
+        let prefix = Appcast.prefixURL(feed: feed)
         switch try Feed.checkLive(prefixURL: prefix) {
         case .ok(let e):
             print("ok: \(e.url) version \(e.version ?? "?") length \(e.length)")
