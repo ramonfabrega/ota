@@ -7,6 +7,24 @@ import Foundation
 public enum Appcast {
     public static let sparkleToolsVersion = "2.9.4"
 
+    /// The fleet's CDN. This and `share` — the publisher, down in
+    /// `publishPlan` — are ONE fact stated twice: the command writes to this
+    /// host. They sit together so a reader meets both at once, and neither
+    /// pretends to be swappable; substituting a CDN means substituting the
+    /// publisher too, and no consumer has ever wanted either.
+    ///
+    /// It was three separate string literals in the CLI, which meant the
+    /// answer to "what does ota assume about infrastructure it does not own"
+    /// was a grep. The full inventory is the README's "What ota assumes" —
+    /// this constant is one line of it, not the whole answer.
+    public static let cdnBaseURL = "https://cdn.ramonfabrega.com/"
+
+    /// `ccc` → `https://cdn.ramonfabrega.com/ccc/`. Every feed URL, enclosure
+    /// and stable key in the flow is built from this one prefix, so the app's
+    /// `SUFeedURL`, the appcast's download-url-prefix and what `verify`
+    /// fetches cannot disagree about where the feed lives.
+    public static func prefixURL(feed: String) -> String { cdnBaseURL + feed + "/" }
+
     public static func toolsBin(home: URL = .homeDirectory) -> URL {
         home.appending(path: "Library/Caches/ota-sparkle-tools/\(sparkleToolsVersion)/bin")
     }

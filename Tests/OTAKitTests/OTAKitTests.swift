@@ -145,6 +145,16 @@ func fakeApp(widget: Bool, publicEDKey: String? = nil, version: String = "1.2.3"
     </item></channel></rss>
     """
 
+    /// One prefix feeds the app's `SUFeedURL`, the generated enclosure and
+    /// the live check. They were three separate literals in the CLI, which is
+    /// three chances to publish under one host and verify under another.
+    @Test func onePrefixServesFeedEnclosureAndCheck() {
+        let prefix = Appcast.prefixURL(feed: "ccc")
+        #expect(prefix == Appcast.cdnBaseURL + "ccc/")
+        #expect(prefix.hasSuffix("/"))
+        #expect(Appcast.stableKey(prefixURL: prefix, appName: "ccc") == prefix + "ccc-latest.zip")
+    }
+
     @Test func stableKeyRewrite() {
         let out = Appcast.rewriteToStableKey(xml: xml, prefixURL: "https://cdn.ramonfabrega.com/disk/", appName: "Disk")
         #expect(out.contains("url=\"https://cdn.ramonfabrega.com/disk/Disk-latest.zip\""))
