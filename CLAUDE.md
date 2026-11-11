@@ -149,9 +149,10 @@ holding for one consumer, which is what disk and mux were waiting on.
 first app not built by SwiftPM, and three things its script did by hand
 moved into ota: helpers are signed (`Signing.helpers`), `--sparkle` places
 the framework from the tools' own tarball, and `--executable` / `--helper`
-let `ota bundle` own the layout of a cargo build. garita's switch to those
-flags — and the notarized cut and Sparkle-loaded launch on them — is on
-garita's side.
+let `ota bundle` own the layout of a cargo build. garita's script now uses
+them with no codesign or Sparkle copy of its own (garita PR #8), and its
+ad-hoc bundle verifies strict and starts with Sparkle loaded. The first
+notarized cut on those flags is garita's next release.
 
 Wired and tested (swift-testing): the parsers (`minos`, linked frameworks,
 archs, Developer ID identity), `Version.read`, `BundleSpec` → Info.plist,
