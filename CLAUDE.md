@@ -1,7 +1,7 @@
 # ota — over-the-air releases for the fleet's Mac apps
 
 The release flow that mux, disk and ccc each carried as a hand-copied shell
-script, in one place: bundle (SwiftPM apps), sign inside-out with Developer
+script, in one place: bundle (any built executable), sign inside-out with Developer
 ID, notarize, staple, zip, single-item Sparkle appcast on the CDN, verify the
 live feed — plus the app-side library every consumer imports instead of
 copying (`Updater`, `BuildInfo`, `CLIInstall`). Seeded 2026-09-02 out of
@@ -86,7 +86,10 @@ name.
 - **Facts come off the binary, never typed twice.** `LSMinimumSystemVersion`
   from `LC_BUILD_VERSION`; archs from `lipo`; linked frameworks from `otool
   -L`. A plist that states what the binary already knows will disagree with
-  it (ccc v0.1.3, refused by Sparkle on the receiving Mac).
+  it (ccc v0.1.3, refused by Sparkle on the receiving Mac). With helpers
+  there is one plist and several binaries, so the minimum is the HIGHEST
+  `minos` of them. The one fact that is told, not read, is `--sparkle`: a
+  `dlopen` is invisible to `otool -L`.
 - **`ditto --sequesterRsrc`** on every zip. Without it Archive Utility writes
   `._*` files into Sparkle.framework's root and Gatekeeper rejects it, while
   every check on the building Mac passes.
@@ -95,9 +98,11 @@ name.
   symptom in a socket-faced app was "the socket never answers". The dev lane
   has no feed, and "which lane is this" is read off the plist, never a flag.
 - **Sign inside-out, and re-sign Sparkle.** Hardened runtime's library
-  validation demands every dylib carry our team id. Nested XPC services and
-  plug-ins keep their entitlements (`--preserve-metadata=entitlements`) or
-  notarization rejects them.
+  validation demands every dylib carry our team id. Nested XPC services,
+  plug-ins and helpers keep their entitlements
+  (`--preserve-metadata=entitlements`) or notarization rejects them. A helper
+  (`Contents/Helpers`, or a second Mach-O in `Contents/MacOS`) is nested code
+  too: left with the linker's ad-hoc signature, notarization refuses it.
 
 ## Consumers and the migration order
 
@@ -105,7 +110,10 @@ mux (`~/code/fun/tv`, xcodegen; its copy lacks disk's single-item and
 EdDSA-mismatch guards), disk (`~/code/fun/disk`, SwiftPM, universal +
 widget), ccc (`~/code/fun/ccc`, SwiftPM, arm64, CLI symlinked into the
 bundle). scry (`~/code/fun/scry`) has the dev lane only and a Sparkle lane
-waiting.
+waiting. garita (`~/code/fun/garita`, Rust + GPUI, two cargo builds) is the
+first non-Swift consumer and was born on ota rather than migrated to it: a
+window as the main executable, its agent-and-CLI in `Contents/Helpers`, and
+Sparkle loaded at run time rather than linked.
 
 1. ~~**ccc first**~~ — **DONE, v0.1.8 (2026-09-02)**, and it steered the
    interface while it was soft: the `OTA`/`OTAUpdater` split and naming the
@@ -119,11 +127,14 @@ waiting.
    (graduation protocol: work as issues) and a message to each live session.
    scry gets told its Sparkle lane exists.
 
-Each consumer's `scripts/package` becomes: its build, `ota bundle` (SwiftPM
-apps), `ota release`. Its RELEASES.md shrinks to what is app-specific; the
+Each consumer's `scripts/package` becomes: its build, `ota bundle` (anything
+Xcode does not already bundle), `ota release`. Its RELEASES.md shrinks to what is app-specific; the
 shared runbook is `docs/RELEASING.md` here (to be written from disk's).
 
-## State (v0.1.0, 2026-09-02 — the flow is proven end to end)
+## State
+
+Kept version-free on purpose: which release is current is `VERSION`, the
+tags and `git log`. This section says what works, what does not yet, and why.
 
 **ccc v0.1.8 shipped through `ota release` with no flags**: inside-out
 signing, notarized on the first submission, stapled, single-item appcast on
@@ -134,17 +145,30 @@ the `BuildInfo`/`CLIInstall` halves of its `Hosts/BuildInfo.swift` are gone
 (ccc `docs/DESIGN.md` §6a). Its old lane is retired. That is the seam
 holding for one consumer, which is what disk and mux were waiting on.
 
-Wired and tested (42 tests, swift-testing): the parsers (`minos`, linked
-frameworks, archs, Developer ID identity), `Version.read`, `BundleSpec` →
-Info.plist, `Signing.insideOut` over a real bundle layout, the whole release
-plan as `[Step]` with its guards in position, the executor and each guard's
-failure message, `Bundler` assembly and the arch assertion, `Feed.check`,
-and the runner's concurrent pipe drain (a child that writes 200K to the pipe
-nobody reads is what the old one deadlocked on).
+**garita shipped through `ota bundle` + `ota release` (2026-11-10)**, the
+first app not built by SwiftPM, and three things its script did by hand
+moved into ota: helpers are signed (`Signing.helpers`), `--sparkle` places
+the framework from the tools' own tarball, and `--executable` / `--helper`
+let `ota bundle` own the layout of a cargo build. garita's script now uses
+them with no codesign or Sparkle copy of its own (garita PR #8), and its
+ad-hoc bundle verifies strict and starts with Sparkle loaded. The first
+notarized cut on those flags is garita's next release.
 
-Verbs, all live: `ota version`; `ota bundle` (assembles for real — executable,
-whatever the binary links, icon, an already-built `.appex` stamped to the
-app's version, `Info.plist`; `--universal` reads `.build/apple/Products/
+Wired and tested (swift-testing): the parsers (`minos`, linked frameworks,
+archs, Developer ID identity), `Version.read`, `BundleSpec` → Info.plist,
+`Signing.insideOut` over a real bundle layout (helpers included), the whole
+release plan as `[Step]` with its guards in position, the executor and each
+guard's failure message, `Bundler` assembly (helpers, run-time frameworks,
+the no-Sparkle refusal) and the arch assertion, `Feed.check`, and the
+runner's concurrent pipe drain (a child that writes 200K to the pipe nobody
+reads is what the old one deadlocked on).
+
+Verbs, all live: `ota version`; `ota bundle` (assembles for real — executable
+(`--executable` for a non-SwiftPM build), helpers into `Contents/Helpers`,
+whatever the binaries link, `--sparkle` for an app that loads it at run
+time, icon, an already-built `.appex` stamped to the app's version,
+`Info.plist`; refuses a `--feed` bundle with no `Sparkle.framework`, which
+would install and never update; `--universal` reads `.build/apple/Products/
 Release` and asserts every Mach-O is fat); `ota release` (executes, and
 `--dry-run` prints the plan INCLUDING the guards; refuses a path under
 `/Applications` or `~/Applications`, because signing is in place and the zip
@@ -165,15 +189,17 @@ Not wired, in the order they earn themselves:
   command" offer in `OTA` — when ccc writes them, they move here.
 
 Recorded, not fixed: `Signing.insideOut` hardcodes Sparkle's `Versions/B`
-(fine for 2.9, one symlink read from being version-proof), and it does not
-recurse into a non-Sparkle framework's own nested code (fine for all three
-consumers today).
+(fine for 2.9, one symlink read from being version-proof); it does not
+recurse into a non-Sparkle framework's own nested code; and it visits no
+nested code outside the bundle directories and `Contents/Helpers`
+(`Contents/Library/LoginItems`, a helper app's own frameworks). Fine for
+every consumer today.
 
 ## Code conventions
 
 - swift-testing (`import Testing`), one suite per module concern; tests
   build a fake `.app` under the temp dir rather than mocking `FileManager`.
-- Every `ota` invocation self-identifies on stderr (`ota 0.1.0`) so a
+- Every `ota` invocation self-identifies on stderr (`ota <version>`) so a
   transcript says which build did the work. The version is the compiled-in
   `otaVersion`, not a read of `VERSION` — an installed binary is a copy and
   cannot find the repo — and one test holds the two together. JSON output is
