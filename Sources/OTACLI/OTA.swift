@@ -38,23 +38,28 @@ struct Version: ParsableCommand {
 
 struct Bundle: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Assemble <name>.app from a SwiftPM release build.",
+        abstract: "Assemble <name>.app from a release build (SwiftPM's, or any executable).",
         discussion: """
         The toolbox upstream of a built bundle. It never builds: point it at \
-        a products directory and it places the executable, whatever the binary \
-        links, the icon and any already-built app extensions, then writes the \
-        Info.plist.
+        a products directory (or name the executable) and it places the \
+        executable, any helpers, whatever the binaries link, the icon and any \
+        already-built app extensions, then writes the Info.plist.
 
         Which LANE the bundle is, is the presence or absence of --feed: no \
         feed means no SUFeedURL, and the app-side updater never constructs \
         Sparkle at all. That absence is the one definition of "dev build" — \
-        never a flag read at runtime.
+        never a flag read at runtime. A --feed bundle must contain \
+        Sparkle.framework: linked (and so embedded from the products dir), \
+        or placed by --sparkle for an app that loads it at run time.
         """)
 
     @Option(help: "The .app's name, and the executable name inside it.") var name: String
     @Option(name: .customLong("bundle-id")) var bundleID: String
     @Option(name: .customLong("display-name")) var displayName: String?
     @Option(help: "Built product name, when it differs from --name (disk: DiskApp → Disk).") var product: String?
+    @Option(help: "The built executable itself, instead of <products dir>/<product> (e.g. a cargo target/release/<bin>). What it links is looked up beside it.") var executable: String?
+    @Option(name: .customLong("helper"), parsing: .upToNextOption, help: "A second built executable, placed in Contents/Helpers (repeatable). `ota release` signs it before the app.") var helpers: [String] = []
+    @Flag(help: "Embed Sparkle.framework (ota's pinned \(Appcast.sparkleToolsVersion), fetched with the tools when missing) for an app that loads it at run time rather than linking it.") var sparkle = false
     @Option(help: "CDN prefix for self-update (e.g. ccc). Omit for the dev lane: no SUFeedURL, no Sparkle at runtime.") var feed: String?
     @Option(name: .customLong("public-key"), help: "Sparkle EdDSA public key (required with --feed).") var publicKey: String?
     @Option(help: "Icon file, copied into Contents/Resources (e.g. Design/AppIcon.icns).") var icon: String?
@@ -69,16 +74,33 @@ struct Bundle: ParsableCommand {
         SelfID.announce()
         let repoURL = URL(filePath: repo)
         let version = try OTAKit.Version.read(repo: repoURL)
-        let products = Bundler.productsDirectory(repo: repoURL, universal: universal)
-        let executable = products.appending(path: product ?? name)
-        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-            throw ValidationError("no executable at \(executable.path) — build first"
-                                  + (universal ? " (--universal reads the LIPO'd products dir; did the build pass --arch twice?)" : ""))
+        if executable != nil, product != nil {
+            throw ValidationError("--executable names the binary outright; --product names it inside the products dir — pass one")
         }
-        // Never typed twice: the deployment target is whatever the binary was
-        // BUILT for. A plist that states it independently will disagree, and
-        // Sparkle on the receiving Mac believes the plist (ccc v0.1.3).
-        let minos = try Binary.minos(of: executable)
+        let executableURL: URL
+        let products: URL
+        if let executable {
+            executableURL = URL(filePath: executable)
+            products = executableURL.deletingLastPathComponent()
+        } else {
+            products = Bundler.productsDirectory(repo: repoURL, universal: universal)
+            executableURL = products.appending(path: product ?? name)
+        }
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw ValidationError("no executable at \(executableURL.path) — build first"
+                                  + (universal && executable == nil ? " (--universal reads the LIPO'd products dir; did the build pass --arch twice?)" : ""))
+        }
+        let helperURLs = helpers.map { URL(filePath: $0) }
+        for helper in helperURLs where !FileManager.default.isExecutableFile(atPath: helper.path) {
+            throw ValidationError("no helper at \(helper.path) — build it first")
+        }
+        // Never typed twice: the deployment target is whatever the binaries
+        // were BUILT for. A plist that states it independently will disagree,
+        // and Sparkle on the receiving Mac believes the plist (ccc v0.1.3).
+        // With helpers there is one plist and several binaries: the highest.
+        let minimums = try ([executableURL] + helperURLs).map { ($0, try Binary.minos(of: $0)) }
+        let minos = Binary.highest(minimums.map(\.1))!
+        let raisedBy = minimums.dropFirst().first { $0.1 == minos && minimums[0].1 != minos }?.0
 
         var feedSpec: BundleSpec.Feed?
         if let feed {
@@ -98,20 +120,43 @@ struct Bundle: ParsableCommand {
                               minimumSystemVersion: minos, feed: feedSpec,
                               iconFile: iconURL?.deletingPathExtension().lastPathComponent, extra: extra)
         let outURL = out.map { URL(filePath: $0) } ?? repoURL.appending(path: ".build/\(name).app")
-        let input = Bundler.Input(spec: spec, executable: executable, productsDirectory: products,
-                                  icon: iconURL, plugins: plugins.map { URL(filePath: $0) })
+        let toolsBin = Appcast.toolsBin()
+        let sparkleFramework = Appcast.framework(toolsBin: toolsBin)
+        let input = Bundler.Input(spec: spec, executable: executableURL, productsDirectory: products,
+                                  icon: iconURL, plugins: plugins.map { URL(filePath: $0) },
+                                  helpers: helperURLs, frameworks: sparkle ? [sparkleFramework] : [])
 
         guard !dryRun else {
             print(String(decoding: try spec.infoPlistXML(), as: UTF8.self))
             print("would write \(outURL.path)", to: &standardError)
-            print("  executable: \(executable.path) → Contents/MacOS/\(name)", to: &standardError)
-            for f in try Binary.linkedFrameworks(of: executable) {
-                print("  embeds: \(products.appending(path: f).path)", to: &standardError)
+            print("  executable: \(executableURL.path) → Contents/MacOS/\(name)", to: &standardError)
+            for h in helperURLs { print("  helper: \(h.path) → Contents/Helpers/\(h.lastPathComponent)", to: &standardError) }
+            var linked: [String] = []
+            for binary in [executableURL] + helperURLs {
+                for f in try Binary.linkedFrameworks(of: binary) where !linked.contains(f) {
+                    linked.append(f)
+                    print("  embeds: \(products.appending(path: f).path)", to: &standardError)
+                }
+            }
+            if sparkle {
+                print("  embeds: \(sparkleFramework.path) (Sparkle \(Appcast.sparkleToolsVersion); fetched first if missing)", to: &standardError)
             }
             for p in plugins { print("  plug-in: \(p)", to: &standardError) }
+            if feed != nil, !sparkle, !linked.contains("Sparkle.framework") {
+                print("\nnote: a real run of this would be refused — --feed with no Sparkle.framework (nothing links it; pass --sparkle if the app loads it at run time)", to: &standardError)
+            }
             return
         }
 
+        if sparkle {
+            let executor = Executor { line in print(line, to: &standardError) }
+            do {
+                try executor.execute(.fetchToolsIfMissing(bin: toolsBin))
+            } catch {
+                print("ota: \(error)", to: &standardError)
+                throw ExitCode(1)
+            }
+        }
         let app = try Bundler.assemble(input, into: outURL)
         if universal {
             for (binary, archs) in try Bundler.assertArchs(app, required: ["arm64", "x86_64"]) {
@@ -119,8 +164,10 @@ struct Bundle: ParsableCommand {
             }
         }
         print(outURL.path)
-        print("bundle: \(name).app v\(version.marketing) build \(version.build), macOS ≥ \(minos), "
-              + (feedSpec == nil ? "dev (no feed)" : "release (feed \(feed!))"), to: &standardError)
+        let raised: String = raisedBy.map { " (raised by helper \($0.lastPathComponent))" } ?? ""
+        let lane: String = feedSpec == nil ? "dev (no feed)" : "release (feed \(feed!))"
+        print("bundle: \(name).app v\(version.marketing) build \(version.build), macOS ≥ \(minos)\(raised), \(lane)",
+              to: &standardError)
     }
 }
 

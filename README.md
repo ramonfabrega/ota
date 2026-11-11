@@ -63,7 +63,7 @@ why "distributing the tool" is a non-problem.
 
 | Assumption | Where | Why |
 | --- | --- | --- |
-| Sparkle tools `2.9.4` | `Appcast.sparkleToolsVersion` | `generate_appcast` and `generate_keys`, fetched from that tag's GitHub release tarball on first use and cached at `~/Library/Caches/ota-sparkle-tools/<version>/bin`. Fetched as four argv commands, never `sh -c`, so the plan prints and runs without a shell. |
+| Sparkle tools `2.9.4` | `Appcast.sparkleToolsVersion` | `generate_appcast` and `generate_keys`, fetched from that tag's GitHub release tarball on first use and cached at `~/Library/Caches/ota-sparkle-tools/<version>/bin`. Fetched as four argv commands, never `sh -c`, so the plan prints and runs without a shell. The same tarball's `Sparkle.framework` (beside `bin`) is what `ota bundle --sparkle` embeds for an app that loads Sparkle at run time — so that app runs the version the tools sign for, and the cache counts as present only when both halves are there. |
 | `Sparkle.framework/Versions/B` | `Signing.insideOut` | Sparkle 2's current version directory, hardcoded. One symlink read from being version-proof; correct for 2.9. |
 | `--maximum-versions 1 --maximum-deltas 0` | `Appcast.generatePlan` | Necessary and **not sufficient**: the feed is regenerated from an emptied directory and then asserted single-item, because `generate_appcast` keeps an older entry across an arch transition regardless of this flag. |
 | ~13 tools on PATH | throughout | `codesign`, `ditto`, `otool`, `lipo`, `spctl`, `security`, `git`, `curl`, `tar`, `find`, plus `xcrun notarytool` / `stapler`. Xcode command line tools and base macOS; none is version-pinned. |
@@ -74,13 +74,17 @@ why "distributing the tool" is a non-problem.
 | --- | --- | --- |
 | `VERSION` at the repo root, `MAJOR.MINOR.PATCH` | `Version.read` | One place to bump the marketing version. |
 | `git rev-list --count HEAD` is the build number | `Version.read` | Monotonic with zero upkeep, and it is what Sparkle compares — so a dev build (commits past the tag) always outranks the released zip and is never offered a downgrade. |
-| `.build/release`, or `.build/apple/Products/Release` with `--universal` | `Bundler.productsDirectory` | SwiftPM's multi-arch build emits LIPO'd products elsewhere while `.build/release` stays a symlink to the host-arch build, so reading the wrong one ships a thin "universal" release silently. `--universal` proves every Mach-O is fat rather than assuming it. |
+| `.build/release`, or `.build/apple/Products/Release` with `--universal` | `Bundler.productsDirectory` | SwiftPM's multi-arch build emits LIPO'd products elsewhere while `.build/release` stays a symlink to the host-arch build, so reading the wrong one ships a thin "universal" release silently. `--universal` proves every Mach-O is fat rather than assuming it. A non-SwiftPM build names its binary with `--executable` instead, and its links are looked up beside it. |
+| Helpers live in `Contents/Helpers` | `Signing.helpers` | Apple's place for helper tools and apps, and where `ota bundle --helper` puts them. `ota release` signs every bundle or Mach-O there, and every Mach-O in `Contents/MacOS` besides `CFBundleExecutable`, after the frameworks and plug-ins and before the app. Nested code anywhere else (`Contents/Library/LoginItems`, a helper's own frameworks) is not visited. |
+| A `--feed` bundle contains `Sparkle.framework` | `Bundler.assemble` | Linked (embedded from the products dir) or placed (`--sparkle`). A release-lane bundle without it installs and then never updates, silently, on someone else's Mac — so it is refused. |
 | `~/.local/bin` | `scripts/install` | Where `claude`'s own installer puts things, so it is on PATH on any Mac that runs the harness. `CLIInstall` prefers `/opt/homebrew/bin` and `/usr/local/bin` first and falls back to it. |
 | macOS 14+ | `Package.swift` | The package floor. A *bundle's* `LSMinimumSystemVersion` is unrelated — that is read off the binary's `LC_BUILD_VERSION`, never typed. |
 
-**Facts that are deliberately not assumptions**: the deployment target, the
-architectures, and the frameworks to embed are all read off the built binary
-(`otool`, `lipo`) rather than configured. A plist that states what the binary
+**Facts that are deliberately not assumptions**: the deployment target (the
+highest across the executable and its helpers), the architectures, and the
+frameworks to embed are all read off the built binaries (`otool`, `lipo`)
+rather than configured. The one exception is `--sparkle`: a `dlopen` is
+invisible to `otool -L`, so that framework is told, not read. A plist that states what the binary
 already knows will eventually disagree with it — ccc v0.1.3 shipped one and
 Sparkle refused the update on the receiving Mac.
 

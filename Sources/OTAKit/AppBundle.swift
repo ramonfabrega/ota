@@ -57,15 +57,25 @@ public struct AppBundle: Sendable {
         for case let file as URL in walk {
             let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isExecutableKey])
             guard values?.isRegularFile == true, values?.isExecutable == true else { continue }
-            guard let handle = try? FileHandle(forReadingFrom: file) else { continue }
-            defer { try? handle.close() }
-            guard let magic = try? handle.read(upToCount: 4), magic.count == 4 else { continue }
-            // Mach-O 64-bit (cf/ce faedfe) and the fat/universal wrappers.
-            let bytes = [UInt8](magic)
-            let isMachO = bytes == [0xcf, 0xfa, 0xed, 0xfe] || bytes == [0xce, 0xfa, 0xed, 0xfe]
-                || bytes == [0xca, 0xfe, 0xba, 0xbe] || bytes == [0xbe, 0xba, 0xfe, 0xca]
-            if isMachO { found.append(file) }
+            if Self.isMachO(file) { found.append(file) }
         }
         return found.sorted { $0.path < $1.path }
+    }
+
+    /// The main executable's name: `CFBundleExecutable`, or the bundle's
+    /// name when the plist does not say.
+    public func mainExecutableName() -> String {
+        ((try? string("CFBundleExecutable")) ?? nil) ?? name
+    }
+
+    /// Mach-O by its magic, not its name or mode: thin 64- and 32-bit and
+    /// the fat/universal wrapper, in either byte order.
+    public static func isMachO(_ file: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return false }
+        defer { try? handle.close() }
+        guard let magic = try? handle.read(upToCount: 4), magic.count == 4 else { return false }
+        let bytes = [UInt8](magic)
+        return bytes == [0xcf, 0xfa, 0xed, 0xfe] || bytes == [0xce, 0xfa, 0xed, 0xfe]
+            || bytes == [0xca, 0xfe, 0xba, 0xbe] || bytes == [0xbe, 0xba, 0xfe, 0xca]
     }
 }

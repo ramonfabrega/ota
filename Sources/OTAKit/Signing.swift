@@ -50,7 +50,19 @@ public enum Signing {
     /// runtime's library validation demands every dylib carry OUR team id,
     /// which is why Sparkle — shipped signed by its authors — is re-signed
     /// at all. Sparkle's nested executables come first per its docs, then
-    /// every framework, then every plug-in, then the app.
+    /// every framework, plug-in and XPC service, then every helper, then the
+    /// app.
+    ///
+    /// A helper is nested code outside those bundle directories: everything
+    /// in `Contents/Helpers` (Apple's place for helper tools and apps), and
+    /// any Mach-O in `Contents/MacOS` other than the main executable.
+    /// garita's agent (`Contents/Helpers/garita`, a second Rust binary) is
+    /// the first. Left unsigned it carries only the linker's ad-hoc
+    /// signature, which notarization rejects as nested code without the
+    /// hardened runtime — so garita signed it by hand, a second copy of the
+    /// identity lookup and the flags. Symlinks are skipped (not code; the
+    /// target is signed where it lives). Helpers keep their entitlements, as
+    /// plug-ins do: a bare binary has none to keep, a helper app may.
     public static func insideOut(app: URL, entitlements: String? = nil,
                                  fileManager fm: FileManager = .default) -> [Step] {
         var steps: [Step] = []
@@ -69,8 +81,36 @@ public enum Signing {
                 steps.append(Step(path: url.appending(path: entry).path, preserveEntitlements: dir != "Frameworks"))
             }
         }
+        for helper in helpers(app: app, fileManager: fm) {
+            steps.append(Step(path: helper.path, preserveEntitlements: true))
+        }
         steps.append(Step(path: app.path, preserveEntitlements: false, entitlements: entitlements))
         return steps
+    }
+
+    /// The helpers in `app`, in signing order: every non-hidden entry of
+    /// `Contents/Helpers` that is a bundle or a Mach-O, then every Mach-O in
+    /// `Contents/MacOS` besides `CFBundleExecutable`.
+    public static func helpers(app: URL, fileManager fm: FileManager = .default) -> [URL] {
+        let contents = app.appending(path: "Contents")
+        func entries(_ dir: String) -> [URL] {
+            let url = contents.appending(path: dir)
+            return ((try? fm.contentsOfDirectory(atPath: url.path)) ?? []).sorted()
+                .filter { !$0.hasPrefix(".") }
+                .map { url.appending(path: $0) }
+                .filter { (try? fm.destinationOfSymbolicLink(atPath: $0.path)) == nil }
+        }
+        var found: [URL] = []
+        for entry in entries("Helpers") {
+            var isDirectory: ObjCBool = false
+            _ = fm.fileExists(atPath: entry.path, isDirectory: &isDirectory)
+            if isDirectory.boolValue || AppBundle.isMachO(entry) { found.append(entry) }
+        }
+        let main = AppBundle(app).mainExecutableName()
+        for entry in entries("MacOS") where entry.lastPathComponent != main && AppBundle.isMachO(entry) {
+            found.append(entry)
+        }
+        return found
     }
 
     /// The `codesign` commands for `steps`, plus the strict verify at the end.
