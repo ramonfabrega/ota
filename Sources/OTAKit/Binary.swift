@@ -32,6 +32,23 @@ public enum Binary {
         return v
     }
 
+    /// The highest of several deployment targets, compared numerically
+    /// (`"9.0" < "11.0" < "13.3"`). A bundle with a helper has more than one
+    /// binary and ONE `LSMinimumSystemVersion`, which must be the highest of
+    /// them: a helper built for a newer macOS than the window is a bundle
+    /// that installs on a Mac where half of it cannot run.
+    public static func highest(_ versions: [String]) -> String? {
+        func parts(_ v: String) -> [Int] { v.split(separator: ".").map { Int($0) ?? 0 } }
+        return versions.max { a, b in
+            let (pa, pb) = (parts(a), parts(b))
+            for i in 0..<max(pa.count, pb.count) {
+                let (x, y) = (i < pa.count ? pa[i] : 0, i < pb.count ? pb[i] : 0)
+                if x != y { return x < y }
+            }
+            return false
+        }
+    }
+
     // MARK: linked frameworks
 
     /// The frameworks the binary actually loads (`@rpath/...framework` and

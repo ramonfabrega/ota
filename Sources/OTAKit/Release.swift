@@ -16,7 +16,8 @@ public enum Step: Equatable, Sendable, CustomStringConvertible {
     case run(Command)
     /// Run it, hand it the terminal. The minutes-long, chatty ones.
     case stream(Command)
-    /// Fetch Sparkle's tools when `bin` has none, and never otherwise.
+    /// Fetch Sparkle's distribution (the tools in `bin`, the framework beside
+    /// it) when it is not all there, and never otherwise.
     case fetchToolsIfMissing(bin: URL)
     /// `generate_keys -p` must equal the app's pinned `SUPublicEDKey`, or
     /// every update this cut signs is rejected on the receiving Mac. Before
@@ -203,7 +204,7 @@ public struct Executor {
             try runner.run(c, streaming: true)
 
         case .fetchToolsIfMissing(let bin):
-            guard !fileManager.isExecutableFile(atPath: bin.appending(path: "generate_appcast").path) else {
+            guard !Appcast.distributionIsPresent(toolsBin: bin, fileManager: fileManager) else {
                 log("  tools present")
                 return
             }
@@ -211,8 +212,8 @@ public struct Executor {
                 log("  → \(c)")
                 try runner.run(c, streaming: true)
             }
-            guard fileManager.isExecutableFile(atPath: bin.appending(path: "generate_appcast").path) else {
-                throw StepFailure(description: "fetched Sparkle \(Appcast.sparkleToolsVersion) but \(bin.path)/generate_appcast is still not there")
+            guard Appcast.distributionIsPresent(toolsBin: bin, fileManager: fileManager) else {
+                throw StepFailure(description: "fetched Sparkle \(Appcast.sparkleToolsVersion) but \(bin.path)/generate_appcast or \(Appcast.framework(toolsBin: bin).path) is still not there")
             }
 
         case .requireEdDSAKeyMatch(let app, let toolsBin):

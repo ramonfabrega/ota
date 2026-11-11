@@ -29,6 +29,22 @@ public enum Appcast {
         home.appending(path: "Library/Caches/ota-sparkle-tools/\(sparkleToolsVersion)/bin")
     }
 
+    /// The `Sparkle.framework` that ships in the same tarball as the tools,
+    /// beside `bin`. What `ota bundle --sparkle` embeds for an app that loads
+    /// Sparkle at run time instead of linking it (garita: Rust, which links
+    /// nothing `otool -L` could name).
+    public static func framework(toolsBin: URL) -> URL {
+        toolsBin.deletingLastPathComponent().appending(path: "Sparkle.framework")
+    }
+
+    /// The distribution is there when both halves are: the tools and the
+    /// framework come from one tarball, so a cache holding one without the
+    /// other is a partial extraction and is fetched again.
+    public static func distributionIsPresent(toolsBin: URL, fileManager fm: FileManager = .default) -> Bool {
+        fm.isExecutableFile(atPath: toolsBin.appending(path: "generate_appcast").path)
+            && fm.fileExists(atPath: framework(toolsBin: toolsBin).appending(path: "Versions/Current").path)
+    }
+
     /// Fetch Sparkle's tools once per version. Two argv commands rather than
     /// `sh -c "curl … | tar …"`: a plan step is printable and runnable without
     /// a shell, and an interpolated path never has to survive quoting.

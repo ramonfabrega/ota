@@ -499,3 +499,172 @@ final class FakeRunner: Runner, @unchecked Sendable {
         #expect(error?.stderr == "boom")
     }
 }
+
+// MARK: - helpers and run-time frameworks (garita: Rust, a second executable, Sparkle via dlopen)
+
+@Suite struct HelpersAndRuntimeFrameworks {
+    func scratch() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "ota-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// A real Mach-O at `url`, so the magic check and `otool` have something to read.
+    func machO(_ url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(filePath: "/bin/echo"), to: url)
+    }
+
+    /// A framework-shaped directory: enough for placement, not for linking.
+    func framework(_ url: URL) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: url.appending(path: "Versions/B"), withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: url.appending(path: "Versions/Current").path, withDestinationPath: "B")
+    }
+
+    func spec(feed: Bool) -> BundleSpec {
+        BundleSpec(name: "Fake", bundleID: "com.example.fake",
+                   version: Version(marketing: "1.2.3", build: 42), minimumSystemVersion: "11.0",
+                   feed: feed ? .init(url: "https://cdn/fake/appcast.xml", publicEDKey: "KEY") : nil)
+    }
+
+    /// Nested code `insideOut` used to never visit: garita's agent in
+    /// Contents/Helpers kept the linker's ad-hoc signature, and notarization
+    /// refuses nested code without the hardened runtime.
+    @Test func helpersAreSignedAfterPluginsAndBeforeTheApp() throws {
+        let app = try fakeApp(widget: true)
+        let contents = app.appending(path: "Contents")
+        let fm = FileManager.default
+        try machO(contents.appending(path: "MacOS/Fake"))            // the main executable: signed as the app
+        try machO(contents.appending(path: "MacOS/fake-cli"))        // a second Mach-O beside it: a helper
+        try Data("#!/bin/sh\n".utf8).write(to: contents.appending(path: "MacOS/launcher.sh"))  // not code
+        try machO(contents.appending(path: "Helpers/garita"))
+        try fm.createDirectory(at: contents.appending(path: "Helpers/Login.app"), withIntermediateDirectories: true)
+        try Data("notes".utf8).write(to: contents.appending(path: "Helpers/README"))            // not code
+        try fm.createSymbolicLink(atPath: contents.appending(path: "Helpers/alias").path,
+                                  withDestinationPath: "garita")                                  // not code either
+
+        let steps = Signing.insideOut(app: app)
+        let tails = steps.map { URL(filePath: $0.path).lastPathComponent }
+        #expect(tails == ["Installer.xpc", "Downloader.xpc", "Autoupdate", "Updater.app", "Sparkle.framework",
+                          "FakeWidget.appex", "Login.app", "garita", "fake-cli", "Fake.app"])
+        #expect(steps.first { $0.path.hasSuffix("Helpers/garita") }?.preserveEntitlements == true)
+    }
+
+    /// Both lanes: the ad-hoc packaging test signs the helper too, so a
+    /// consumer's script is never told about the lane twice.
+    @Test func helperIsSignedInBothLanes() throws {
+        let app = try fakeApp(widget: false)
+        let helper = app.appending(path: "Contents/Helpers/garita")
+        try machO(helper)
+        let steps = Signing.insideOut(app: app)
+
+        let adHoc = Signing.plan(steps, identity: .adHoc)
+        #expect(adHoc.contains(Command("codesign", "--force", "--sign", "-", "--preserve-metadata=entitlements", helper.path)))
+
+        let id = "Developer ID Application: X (TEAM)"
+        let real = Signing.plan(steps, identity: .developerID(id))
+        #expect(real.contains(Command("codesign", "--force", "--timestamp", "--options", "runtime", "--sign", id,
+                                      "--preserve-metadata=entitlements", helper.path)))
+        let helperAt = try #require(real.firstIndex { $0.arguments.last == helper.path })
+        let appAt = try #require(real.firstIndex { $0.arguments.last == app.path && !$0.arguments.contains("--verify") })
+        #expect(helperAt < appAt)
+    }
+
+    @Test func highestDeploymentTargetIsNumeric() {
+        #expect(Binary.highest(["11.0", "9.0", "13.3", "13"]) == "13.3")
+        #expect(Binary.highest(["26.0", "11.0"]) == "26.0")
+        #expect(Binary.highest(["14.0"]) == "14.0")
+        #expect(Binary.highest([]) == nil)
+    }
+
+    @Test func placesHelperAndARuntimeFramework() throws {
+        let dir = try scratch()
+        let executable = dir.appending(path: "target/release/fake-desktop")
+        let helper = dir.appending(path: "target/release/fake")
+        try machO(executable)
+        try machO(helper)
+        let sparkle = dir.appending(path: "cache/Sparkle.framework")
+        try framework(sparkle)
+
+        let out = dir.appending(path: "Fake.app")
+        let app = try Bundler.assemble(.init(spec: spec(feed: true), executable: executable,
+                                             productsDirectory: executable.deletingLastPathComponent(),
+                                             helpers: [helper], frameworks: [sparkle]), into: out)
+        let fm = FileManager.default
+        #expect(fm.isExecutableFile(atPath: out.appending(path: "Contents/MacOS/Fake").path))
+        #expect(fm.isExecutableFile(atPath: out.appending(path: "Contents/Helpers/fake").path))
+        // copyItem keeps the framework's Versions symlinks as symlinks.
+        #expect((try? fm.destinationOfSymbolicLink(
+            atPath: out.appending(path: "Contents/Frameworks/Sparkle.framework/Versions/Current").path)) == "B")
+        #expect(try app.publicEDKey() == "KEY")
+        #expect(Signing.helpers(app: out).map(\.lastPathComponent) == ["fake"])
+    }
+
+    /// A release bundle with no Sparkle installs fine and then never updates.
+    @Test func feedWithoutSparkleIsRefused() throws {
+        let dir = try scratch()
+        let executable = dir.appending(path: "bin/fake-desktop")
+        try machO(executable)
+        let out = dir.appending(path: "Fake.app")
+        let error = #expect(throws: Bundler.Error.self) {
+            try Bundler.assemble(.init(spec: spec(feed: true), executable: executable,
+                                       productsDirectory: executable.deletingLastPathComponent()), into: out)
+        }
+        #expect(error?.description.contains("--sparkle") == true)
+        #expect(!FileManager.default.fileExists(atPath: out.path))
+
+        // The dev lane has no feed, so no Sparkle is fine.
+        try Bundler.assemble(.init(spec: spec(feed: false), executable: executable,
+                                   productsDirectory: executable.deletingLastPathComponent()), into: out)
+    }
+
+    /// Linked means embedded from the products dir already; placing a second
+    /// copy would leave two versions of one framework in one bundle.
+    @Test func aLinkedFrameworkIsNotPlacedTwice() throws {
+        let dir = try scratch()
+        let products = dir.appending(path: "products")
+        let executable = products.appending(path: "FakeApp")
+        try machO(executable)
+        try framework(products.appending(path: "Sparkle.framework"))
+        let cached = dir.appending(path: "cache/Sparkle.framework")
+        try framework(cached)
+        let runner = FakeRunner(output: ["otool": """
+        \(executable.path):
+        \t@rpath/Sparkle.framework/Versions/B/Sparkle (compatibility version 1.0.0)
+        """])
+        let error = #expect(throws: Bundler.Error.self) {
+            try Bundler.assemble(.init(spec: spec(feed: true), executable: executable, productsDirectory: products,
+                                       frameworks: [cached]),
+                                 into: dir.appending(path: "Fake.app"), runner: runner)
+        }
+        #expect(error?.description.contains("already embedded") == true)
+    }
+
+    @Test func aHelperMustBeAnExecutableMachO() throws {
+        let dir = try scratch()
+        let executable = dir.appending(path: "bin/fake-desktop")
+        try machO(executable)
+        let script = dir.appending(path: "bin/fake")
+        try Data("#!/bin/sh\n".utf8).write(to: script)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let error = #expect(throws: Bundler.Error.self) {
+            try Bundler.assemble(.init(spec: spec(feed: false), executable: executable,
+                                       productsDirectory: executable.deletingLastPathComponent(), helpers: [script]),
+                                 into: dir.appending(path: "Fake.app"))
+        }
+        #expect(error?.description.contains("no executable Mach-O") == true)
+    }
+
+    /// One tarball, two halves: a cache with the tools but no framework is a
+    /// partial extraction, and `--sparkle` must not trust it.
+    @Test func theDistributionNeedsBothHalves() throws {
+        let dir = try scratch()
+        let bin = dir.appending(path: "2.9.4/bin")
+        try machO(bin.appending(path: "generate_appcast"))
+        #expect(!Appcast.distributionIsPresent(toolsBin: bin))
+        #expect(Appcast.framework(toolsBin: bin).path == dir.appending(path: "2.9.4/Sparkle.framework").path)
+        try framework(Appcast.framework(toolsBin: bin))
+        #expect(Appcast.distributionIsPresent(toolsBin: bin))
+    }
+}
